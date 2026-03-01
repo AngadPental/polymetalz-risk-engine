@@ -5,7 +5,7 @@ import altair as alt
 st.set_page_config(page_title="Polymetalz Risk Engine (PoC)", layout="wide")
 
 # -----------------------------
-# Preset profiles (editable)
+# Preset profiles (instant output on open)
 # -----------------------------
 PRESETS = {
     "Good Payer – Regular Buyer": {
@@ -43,8 +43,23 @@ PRESETS = {
     },
 }
 
+REQUIRED_COLS = [
+    "buyer_id",
+    "buyer_name",
+    "annual_turnover_cr",
+    "years_in_business",
+    "agreed_dso",
+    "avg_dso",
+    "dso_std",
+    "existing_exposure_cr",
+    "order_value_cr",
+    "orders_per_quarter",
+    "polymer_volatility_pct",
+]
+
+
 # -----------------------------
-# Band scoring helpers (stepwise)
+# Scoring helpers (stepwise)
 # -----------------------------
 def score_dso_deviation(avg_dso: float, agreed_dso: float) -> int:
     dev = avg_dso - agreed_dso
@@ -121,7 +136,7 @@ def apply_volatility_modifier(weighted_score: float, volatility_pct: float) -> f
 
 
 # -----------------------------
-# Credit limit + margin buffer logic
+# Policy logic
 # -----------------------------
 def max_credit_capacity_pct(band: str) -> float:
     return {"Low": 0.15, "Moderate": 0.10, "High": 0.05, "Very High": 0.02}[band]
@@ -146,45 +161,91 @@ def decision_label(band: str, available_limit_cr: float) -> str:
 
 
 # -----------------------------
-# Header
+# UI Header
 # -----------------------------
 st.title("Polymetalz Risk Intelligence Engine")
 st.caption("Proof of Concept: Pre-trade credit + margin decision support (rule-based, manager-adjustable)")
 
 # -----------------------------
-# Sidebar inputs
+# Data ingestion (dataset optional)
 # -----------------------------
 with st.sidebar:
-    st.header("Buyer Profile")
-    preset_name = st.selectbox("Select a preset", list(PRESETS.keys()))
-    preset = PRESETS[preset_name]
+    st.header("Data Source")
+
+    mode = st.radio(
+        "Choose input mode",
+        ["Preset Profiles (instant demo)", "Upload Dataset (CSV)"],
+        index=0,
+    )
+
+    buyers_df = None
+    selected_row = None
+
+    if mode == "Upload Dataset (CSV)":
+        st.caption("Upload a buyers.csv file to auto-fill buyer inputs.")
+        uploaded = st.file_uploader("Upload buyers.csv", type=["csv"])
+
+        if uploaded is not None:
+            try:
+                buyers_df = pd.read_csv(uploaded)
+                missing = [c for c in REQUIRED_COLS if c not in buyers_df.columns]
+                if missing:
+                    st.error(f"Missing columns: {missing}")
+                    st.stop()
+
+                buyers_df = buyers_df.copy()
+                buyers_df["display"] = buyers_df["buyer_id"].astype(str) + " — " + buyers_df["buyer_name"].astype(str)
+
+                buyer_choice = st.selectbox("Select buyer", buyers_df["display"].tolist())
+                selected_row = buyers_df.loc[buyers_df["display"] == buyer_choice].iloc[0].to_dict()
+
+                with st.expander("Preview dataset row", expanded=False):
+                    st.dataframe(pd.DataFrame([selected_row]).drop(columns=["display"], errors="ignore"), use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Could not read CSV: {e}")
+                st.stop()
 
     st.divider()
+    st.header("Buyer Profile")
+
+    if mode == "Preset Profiles (instant demo)":
+        preset_name = st.selectbox("Select a preset", list(PRESETS.keys()))
+        profile = PRESETS[preset_name]
+    else:
+        if selected_row is None:
+            st.info("Upload buyers.csv to enable buyer selection.")
+            profile = PRESETS["Average Buyer – Some Delays"]  # fallback demo
+        else:
+            profile = {
+                "annual_turnover_cr": float(selected_row["annual_turnover_cr"]),
+                "years_in_business": int(selected_row["years_in_business"]),
+                "agreed_dso": int(selected_row["agreed_dso"]),
+                "avg_dso": int(selected_row["avg_dso"]),
+                "dso_std": float(selected_row["dso_std"]),
+                "existing_exposure_cr": float(selected_row["existing_exposure_cr"]),
+                "order_value_cr": float(selected_row["order_value_cr"]),
+                "orders_per_quarter": int(selected_row["orders_per_quarter"]),
+                "polymer_volatility_pct": float(selected_row["polymer_volatility_pct"]),
+            }
+
     st.subheader("Inputs (editable)")
+    annual_turnover_cr = st.number_input("Annual turnover (₹ Cr)", 0.5, 500.0, float(profile["annual_turnover_cr"]), 0.5)
+    years_in_business = st.number_input("Years in business", 0, 50, int(profile["years_in_business"]), 1)
 
-    annual_turnover_cr = st.number_input(
-        "Annual turnover (₹ Cr)", min_value=0.5, max_value=500.0, value=float(preset["annual_turnover_cr"]), step=0.5
-    )
-    years_in_business = st.number_input("Years in business", min_value=0, max_value=50, value=int(preset["years_in_business"]), step=1)
+    agreed_dso = st.number_input("Agreed DSO (days)", 0, 180, int(profile["agreed_dso"]), 1)
+    avg_dso = st.number_input("Avg actual DSO (days)", 0, 180, int(profile["avg_dso"]), 1)
+    dso_std = st.number_input("DSO variability (std dev, days)", 0.0, 60.0, float(profile["dso_std"]), 1.0)
 
-    agreed_dso = st.number_input("Agreed DSO (days)", min_value=0, max_value=180, value=int(preset["agreed_dso"]), step=1)
-    avg_dso = st.number_input("Avg actual DSO (days)", min_value=0, max_value=180, value=int(preset["avg_dso"]), step=1)
-    dso_std = st.number_input("DSO variability (std dev, days)", min_value=0.0, max_value=60.0, value=float(preset["dso_std"]), step=1.0)
+    existing_exposure_cr = st.number_input("Existing outstanding exposure (₹ Cr)", 0.0, 100.0, float(profile["existing_exposure_cr"]), 0.1)
+    order_value_cr = st.number_input("Current order value (₹ Cr)", 0.0, 100.0, float(profile["order_value_cr"]), 0.1)
 
-    existing_exposure_cr = st.number_input(
-        "Existing outstanding exposure (₹ Cr)", min_value=0.0, max_value=100.0, value=float(preset["existing_exposure_cr"]), step=0.1
-    )
-    order_value_cr = st.number_input(
-        "Current order value (₹ Cr)", min_value=0.0, max_value=100.0, value=float(preset["order_value_cr"]), step=0.1
-    )
-
-    orders_per_quarter = st.number_input("Orders per quarter", min_value=0, max_value=50, value=int(preset["orders_per_quarter"]), step=1)
-    polymer_volatility_pct = st.slider("Polymer price volatility (%)", 0.0, 15.0, float(preset["polymer_volatility_pct"]), 0.5)
+    orders_per_quarter = st.number_input("Orders per quarter", 0, 50, int(profile["orders_per_quarter"]), 1)
+    polymer_volatility_pct = st.slider("Polymer price volatility (%)", 0.0, 15.0, float(profile["polymer_volatility_pct"]), 0.5)
 
     st.divider()
     with st.expander("Weights (baseline + adjustable)", expanded=False):
         st.caption("Baseline weights are research-informed; adjust for managerial judgement.")
-
         w_payment = st.slider("Payment history weight", 0, 40, 25)
         w_exposure = st.slider("Exposure ratio weight", 0, 40, 20)
         w_order = st.slider("Order size ratio weight", 0, 30, 15)
@@ -196,15 +257,10 @@ with st.sidebar:
         total_w = w_payment + w_exposure + w_order + w_variability + w_years + w_frequency + w_vol
         if total_w == 0:
             st.error("Weights sum to 0. Increase at least one weight.")
+            st.stop()
         else:
             st.success(f"Total weight = {total_w} (normalized automatically)")
 
-# Fallback if weights expander isn't opened (still safe)
-try:
-    total_w
-except NameError:
-    w_payment, w_exposure, w_order, w_variability, w_years, w_frequency, w_vol = 25, 20, 15, 15, 10, 10, 5
-    total_w = w_payment + w_exposure + w_order + w_variability + w_years + w_frequency + w_vol
 
 # -----------------------------
 # Compute component scores
@@ -214,10 +270,10 @@ s_exposure = score_exposure_ratio(existing_exposure_cr, annual_turnover_cr)
 s_order = score_order_ratio(order_value_cr, annual_turnover_cr)
 s_years = score_years_in_business(years_in_business)
 s_variability = score_payment_variability(dso_std)
-s_frequency = score_order_frequency(orders_per_quarter)
+s_frequency = score_order_frequency(int(orders_per_quarter))
 
 def wnorm(w: float) -> float:
-    return (w / total_w) if total_w > 0 else 0.0
+    return w / total_w
 
 weighted_pre_mod = (
     s_payment * wnorm(w_payment)
@@ -232,23 +288,17 @@ weighted_pre_mod = (
 final_score = apply_volatility_modifier(weighted_pre_mod, polymer_volatility_pct)
 band = risk_band(final_score)
 
-# Credit limit
 cap_pct = max_credit_capacity_pct(band)
 max_credit_cr = annual_turnover_cr * cap_pct
 available_limit_cr = max(0.0, max_credit_cr - existing_exposure_cr)
 
-# Margin recommendation
 base_margin_pp = 1.0
 recommended_margin_pp = base_margin_pp + margin_buffer_pp(band)
 
-# Working capital exposure proxy
 expected_exposure_cr = available_limit_cr * (avg_dso / 365.0)
-
-# Expected loss proxy (illustrative)
 dp = default_proxy(band)
 expected_loss_cr = dp * expected_exposure_cr
 
-# Decision banner
 decision = decision_label(band, available_limit_cr)
 if decision == "APPROVE":
     st.success(f"✅ DECISION: {decision} — within policy thresholds")
@@ -256,6 +306,7 @@ elif decision == "REVIEW":
     st.warning(f"⚠️ DECISION: {decision} — needs manual override / additional safeguards")
 else:
     st.error(f"⛔ DECISION: {decision} — outside risk policy or no available limit")
+
 
 # -----------------------------
 # Tabs
@@ -283,13 +334,12 @@ with tab1:
             """
 - **Rule-based by design**: early-stage deployment + explainability.  
 - **Manager-adjustable weights**: supports judgement in a relationship-driven market.  
-- **Not ML (yet)**: ML needs large labeled history (defaults/DSO outcomes). Once sufficient data exists, ML calibration can be layered.
+- **Not ML (yet)**: ML needs large labeled default/DSO outcome data. Once sufficient data exists, ML calibration can be layered.
 """
         )
 
 with tab2:
     st.markdown("### Visual insights")
-
     left, right = st.columns([1, 1])
 
     with left:
@@ -362,23 +412,19 @@ with tab2:
 
     st.divider()
     st.markdown("### Scenario simulator: DSO stress test (F2 – Working Capital)")
-
     st.caption("Stress-test working capital impact by changing DSO while keeping all other inputs constant.")
 
     sim_col1, sim_col2 = st.columns([1, 1])
-
     with sim_col1:
         scenario_mode = st.radio("Choose scenario set", ["Default (30/45/60 days)", "Custom"], horizontal=True)
-
         if scenario_mode == "Default (30/45/60 days)":
             scenarios = [30, 45, 60]
         else:
-            s1 = st.number_input("Scenario DSO #1", min_value=0, max_value=180, value=30, step=1)
-            s2 = st.number_input("Scenario DSO #2", min_value=0, max_value=180, value=45, step=1)
-            s3 = st.number_input("Scenario DSO #3", min_value=0, max_value=180, value=60, step=1)
+            s1 = st.number_input("Scenario DSO #1", 0, 180, 30, 1)
+            s2 = st.number_input("Scenario DSO #2", 0, 180, 45, 1)
+            s3 = st.number_input("Scenario DSO #3", 0, 180, 60, 1)
             scenarios = sorted(list(set([int(s1), int(s2), int(s3)])))
 
-    # Build scenario table
     sim_rows = []
     for dso in scenarios:
         wc_exposure = available_limit_cr * (dso / 365.0)
@@ -392,11 +438,9 @@ with tab2:
         )
 
     sim_df = pd.DataFrame(sim_rows).sort_values("Scenario DSO (days)")
-
     with sim_col2:
         st.dataframe(sim_df, use_container_width=True, hide_index=True)
 
-    # Bar chart for WC exposure across scenarios
     sim_chart = (
         alt.Chart(sim_df)
         .mark_bar()
@@ -411,7 +455,6 @@ with tab2:
 
 with tab3:
     st.markdown("### Model transparency")
-
     breakdown = pd.DataFrame(
         {
             "Item": [
